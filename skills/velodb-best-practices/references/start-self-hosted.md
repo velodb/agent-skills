@@ -12,7 +12,13 @@ tags: [start, self-hosted, byoc, on-prem, setup]
 2. Deploy BE nodes (3+ for production)
 3. Register BEs with FE: `ALTER SYSTEM ADD BACKEND "<be_host>:9050";`
 4. Create database and tables
-### Connect
+### Connect with VeloCLI (Preferred)
+```bash
+velo auth add local --host <fe_host> --port 9030 --http-port 8030 --user root --password <pass>
+velo use local
+velo auth status    # Verify: shows backends, version, latency
+```
+### Connect via MySQL Client
 ```bash
 mysql -h <fe_host> -P 9030 -u root
 ```

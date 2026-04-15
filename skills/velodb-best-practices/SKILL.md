@@ -5,212 +5,166 @@ description: >
   MUST USE when writing, reviewing, or optimizing Doris CREATE TABLE statements,
   partition/bucket strategies, data models, or cluster configurations.
   Also use when user provides a VeloDB connection string or asks to get started.
-  Also use when user says "design a table", "size a cluster", "my query is slow",
-  or mentions Doris, VeloDB, OLAP table design.
+  Also use when user mentions velo CLI, velocli, or wants to connect to VeloDB/Doris.
 license: Apache-2.0
 metadata:
   author: VeloDB
-  version: "3.0.0"
+  version: "3.1.0"
 ---
 
 # VeloDB Best Practices
 
-> Guided table design workflow for Apache Doris.
-> 4-step process: Gather → Classify → Design → Validate.
-> 37 rules, 7 templates, 4 sizing guides in `references/`.
+> Problem-first table design intelligence for Apache Doris.
+> 37 rules, 7 use case templates, 4 sizing guides.
+> All details in `references/` directory and compiled `AGENTS.md`.
 
 ---
 
-## Instructions
+## 1 ▸ Problem-First Routing
 
-Follow these steps in order. Do NOT skip steps. Do NOT guess what the user needs — ask.
+### I need to build…
 
-### Step 1: Gather Context
+| Problem | Template(s) | Key Rules |
+|---------|-------------|-----------|
+| Real-time log/event analytics | `usecase-log-event` | DUPLICATE, RANGE partition, dynamic TTL, ZSTD |
+| CDC / MySQL sync to Doris | `usecase-cdc-sync` | UNIQUE MoW, sequence_col, HASH bucket |
+| Dashboard with pre-aggregated metrics | `usecase-dashboard-metrics` | AGGREGATE, BITMAP_UNION, sync MV |
+| User-facing API with low-latency point queries | `usecase-point-query` | UNIQUE MoW, store_row_column, BloomFilter |
+| Star schema with JOIN-heavy analytics | `usecase-star-schema-join` | Colocation, same bucket key/count |
+| Small dimension / lookup table | `usecase-dimension-lookup` | DUPLICATE, RANDOM bucket, 3 buckets |
+| Observability (logs + traces + metrics) | `usecase-observability` | 3 tables: DUP logs, DUP traces, AGG metrics |
+| Vehicle/fleet tracking | `usecase-log-event` + `usecase-point-query` | Time-series + point-query hybrid |
+| E-commerce order analytics | `usecase-star-schema-join` + `usecase-dashboard-metrics` | Star schema + AGG rollups |
+| Full-text search / content search | `schema-index-text-search` | Inverted index, MATCH, BM25 |
+| User behavior / funnel analysis | `schema-types-bitmap-count-distinct` | BITMAP_UNION, bitmap_intersect |
+| Semi-structured JSON data | `schema-types-variant-json` | VARIANT type, schema_template |
 
-Before designing any table, collect these 5 dimensions. Ask for anything the user hasn't provided:
+### My query is slow because…
 
-| # | Ask | Why It Matters | Example Answer |
-|---|-----|---------------|----------------|
-| 1 | **What is the data?** Schema, source, example rows | Determines model (DUP/UNIQUE/AGG), data types | "User activity events with user_id, action, timestamp, payload JSON" |
-| 2 | **How much data?** Rows/day, retention period, current total | Determines partition granularity, bucket count, compression | "~200M rows/day, keep 30 days, ~100GB/day raw" |
-| 3 | **How will it be queried?** Top 2-3 query patterns, latency needs | Determines sort key order, indexes, MVs | "Filter by user_id + time range; aggregate by action per day" |
-| 4 | **How will it be loaded?** Batch/streaming/CDC, source system | Determines UNIQUE vs DUP, sequence_col, batch strategy | "Kafka streaming, append-only, no updates" |
-| 5 | **What environment?** Cloud/self-hosted, node count, any SLAs | Determines replication, cache, bucket constraints | "VeloDB Cloud, 3 BEs, dashboard queries < 2s" |
-
-**Rules for gathering:**
-- If user provides partial info, acknowledge what you know and ask for the rest.
-- If user says "I don't know" for volume, suggest starting with a reasonable default and note it can be tuned.
-- If user provides a MySQL/PG schema, infer Q1 and Q4 from it, then ask Q2, Q3, Q5.
-- Sizing and CREATE TABLE are **intertwined** — gather both before designing.
-
-### Step 2: Classify Workload
-
-Based on answers, classify into one or more patterns. Load the matching template:
-
-| If the data is... | Load Template | Key Rules |
-|-------------------|--------------|-----------|
-| Append-only events/logs | `references/usecase-log-event.md` | DUPLICATE, RANGE partition, ZSTD |
-| Updated/deleted rows (CDC) | `references/usecase-cdc-sync.md` | UNIQUE MoW, sequence_col |
-| Pre-aggregated metrics | `references/usecase-dashboard-metrics.md` | AGGREGATE, BITMAP_UNION |
-| User-facing point queries | `references/usecase-point-query.md` | UNIQUE MoW, store_row_column |
-| JOIN-heavy star schema | `references/usecase-star-schema-join.md` | Colocation, matching bucket keys |
-| Small lookup/dimension | `references/usecase-dimension-lookup.md` | DUPLICATE, RANDOM, few buckets |
-| Logs + traces + metrics | `references/usecase-observability.md` | Multi-table design |
-
-**Multi-pattern workloads are normal.** If the user needs both log analytics AND a dashboard, design multiple tables. Explain why they're separate.
-
-### Step 3: Design (CREATE TABLE + Sizing Together)
-
-Produce a **unified design** that includes:
-
-1. **Complete CREATE TABLE** with inline comments explaining WHY each choice:
-   ```sql
-   CREATE TABLE events (
-       event_time DATETIME NOT NULL,  -- Q3: most filtered → sort key pos 1
-       user_id BIGINT NOT NULL,       -- Q3: second filter → sort key pos 2
-       action VARCHAR(50),
-       payload VARIANT                -- Q1: semi-structured JSON → VARIANT
-   ) DUPLICATE KEY(event_time, user_id)  -- Q4: append-only → DUPLICATE
-   PARTITION BY RANGE(event_time) ()     -- Q2: 200M/day → daily partitions
-   DISTRIBUTED BY HASH(user_id) BUCKETS AUTO  -- Q3: user_id filter → HASH
-   PROPERTIES (
-       "dynamic_partition.enable" = "true",
-       "dynamic_partition.time_unit" = "DAY",
-       "dynamic_partition.start" = "-30",    -- Q2: 30-day retention
-       "dynamic_partition.end" = "3",
-       "dynamic_partition.prefix" = "p",
-       "compression" = "zstd"               -- Q2: 100GB/day → ZSTD saves 3×
-   );
-   ```
-
-2. **Sizing implications** derived from the same answers:
-   ```
-   Storage: 100GB/day × 30 days × ZSTD(~10×) × 1 replica = ~300 GB
-   Tablets: 30 partitions × AUTO(~8 buckets) = ~240 tablets
-   Per-tablet: ~1.25 GB ✓ (target: 1-10 GB)
-   ```
-
-3. **Recommended indexes** based on Q3 query patterns.
-
-**Cross-check every decision** against these rules (read the reference file if unsure):
-- [ ] Model matches workload → `references/schema-model-*`
-- [ ] Partition matches volume → `references/schema-partition-*`
-- [ ] Bucket key matches query filters → `references/schema-bucket-*`
-- [ ] Sort key: high-selectivity first, fixed-length before VARCHAR → `references/schema-keys-*`
-- [ ] Native types, not STRING → `references/schema-types-*`
-- [ ] Indexes match query patterns → `references/schema-index-*`
-- [ ] Properties correct for environment → `references/schema-props-*`
-
-### Step 4: Validate
-
-After producing the design, verify:
-
-- [ ] Every query pattern from Step 1 is served by sort key, index, or MV
-- [ ] Tablet size is within 1-10 GB range (check with sizing formula)
-- [ ] Partition count is reasonable (no thousands of empty partitions)
-- [ ] Storage fits cluster capacity
-- [ ] No rule violations
-
-If validation fails, revise Step 3 and explain what changed.
+| Symptom | Check These Rules | Quick Fix |
+|---------|------------------|-----------|
+| Full table scan on WHERE clause | `schema-keys-selectivity-first` | Move filtered column to sort key position 1 |
+| JOINs are slow / shuffle | `usecase-star-schema-join` | Small dims (<1GB): broadcast + runtime filter. Large: colocation |
+| COUNT DISTINCT is slow | `schema-types-bitmap-count-distinct` | Switch to BITMAP_UNION aggregation |
+| LIKE '%keyword%' is slow | `schema-index-ngram-for-like` | Add NGram BloomFilter index |
+| Point query latency too high | `usecase-point-query` | Enable store_row_column + Prepared Statement |
+| Storage growing too fast | `schema-partition-auto-on-demand` + `schema-props-compression` | AUTO PARTITION + ZSTD compression + scheduled DROP PARTITION |
+| Sync MV not being used | `schema-mv-sync-rollup` | Use raw columns (not date_trunc) in MV GROUP BY; unique aliases |
+| Async MV rewrite fails | `schema-mv-async-join` + `schema-mv-async-limits` | Check State/RefreshState; query MV directly if predicate fails |
+| Data skew / hot tablets | `schema-bucket-composite-for-skew` | Composite bucket key or RANDOM |
+| Import fails / data version error | `schema-mv-async-limits` | Check concurrent MV refresh limit (max 3) |
+| VARCHAR in key kills perf | `schema-keys-fixed-length-types` | Move VARCHAR after fixed-length types |
+| Writes slow on UNIQUE table | `schema-model-prefer-mow` | Ensure MoW is enabled (not MoR) |
 
 ---
 
-## Troubleshooting (Reactive Workflow)
+## 2 ▸ Pre-Flight Checklist (Before Any CREATE TABLE)
 
-When the user comes with an **existing problem**, follow the same discovery-first approach:
+Run through this checklist in order. Each step references the relevant rule:
 
-### Step T1: Gather Evidence
-
-Ask for ALL of these before suggesting any fix:
-
-| # | Ask For | Why | If Missing |
-|---|---------|-----|------------|
-| 1 | **The CREATE TABLE** (full DDL) | Can't diagnose without seeing model, keys, partitions | Run `SHOW CREATE TABLE tablename` |
-| 2 | **The slow query** (exact SQL) | Need to see WHERE, JOIN, GROUP BY, ORDER BY | Ask user to paste it |
-| 3 | **Query profile** | Shows scan type, rows read, time breakdown | `curl -u user:pass http://<fe>:<http_port>/api/profile/text?query_id=<id>` |
-| 4 | **Data volume & cluster** | Skew and sizing issues need context | `SHOW TABLETS FROM tablename` for distribution |
-
-**DO NOT suggest fixes until you have ALL four items.** Don't guess.
-
-### Step T2: Diagnose Root Cause
-
-With evidence in hand, check in this order (most impactful first):
-
-1. **Sort key vs WHERE clause** → Is the filtered column in the sort key prefix?
-   - Read `references/schema-keys-selectivity-first.md`
-   - Check if ZoneMap can prune → `references/schema-types-zonemap-limitations.md`
-
-2. **Model mismatch** → Is AGGREGATE used where updates are needed? Is DUPLICATE used where dedup is needed?
-   - Read `references/schema-model-choose-for-workload.md`
-
-3. **Partition/Bucket issues** → Too many small tablets? Skew? Full scan across all partitions?
-   - Read `references/schema-partition-*` and `references/schema-bucket-*`
-
-4. **Missing indexes** → LIKE without NGram? Point query without BloomFilter? Text search without inverted?
-   - Read `references/schema-index-*`
-
-5. **JOIN performance** → Missing colocation? Wrong bucket key?
-   - Read `references/usecase-star-schema-join.md`
-
-### Step T3: Prescribe Fix
-
-Produce a clear output:
-
-```
-## Diagnosis
-- Root cause: [what's wrong and why, citing evidence from EXPLAIN]
-- Rule violated: [reference file name]
-
-## Fix
-### Revised CREATE TABLE (if schema change needed)
-[full DDL with inline comments showing what changed and why]
-
-### Migration Steps
-1. CREATE TABLE new_table AS SELECT ... (new schema)
-2. INSERT INTO new_table SELECT ... FROM old_table
-3. ALTER TABLE old_table RENAME ... / DROP ...
-
-### Expected Improvement
-- Before: [X rows scanned, Y seconds]
-- After: [Z rows scanned, estimated time]
-```
-
-### Symptom Quick-Reference (for Step T2)
-
-| Symptom | Most Likely Root Cause | Key Reference |
-|---------|----------------------|---------------|
-| Full table scan on WHERE | Filtered column not in sort key prefix | `schema-keys-selectivity-first` |
-| JOINs are slow / shuffle | Missing colocation group | `usecase-star-schema-join` |
-| COUNT DISTINCT slow | Using raw COUNT instead of BITMAP | `schema-types-bitmap-count-distinct` |
-| LIKE '%keyword%' slow | No NGram BloomFilter index | `schema-index-ngram-for-like` |
-| Point query > 100ms | Missing store_row_column or BloomFilter | `usecase-point-query` |
-| Storage growing too fast | No TTL or wrong compression | `schema-partition-dynamic-ttl` |
-| Data skew / hot tablets | Low-cardinality bucket key | `schema-bucket-composite-for-skew` |
-| VARCHAR in key kills perf | Variable-length type before fixed-length | `schema-keys-fixed-length-types` |
-| Writes slow on UNIQUE | Using MoR instead of MoW | `schema-model-prefer-mow` |
+- [ ] **Data model** — UNIQUE (updates?) vs DUPLICATE (append?) vs AGGREGATE (pre-agg only?) → `schema-model-choose-for-workload`
+- [ ] **Partition strategy** — Time-series? AUTO PARTITION preferred. Small table? Skip. Do NOT combine AUTO with dynamic_partition. → `schema-partition-*`
+- [ ] **Bucket key + count** — HASH on JOIN key. Calculate explicit count: `daily_GB / target_tablet_GB`. Avoid BUCKETS AUTO. → `schema-bucket-*`
+- [ ] **Sort key order** — High-selectivity first, fixed-length before VARCHAR → `schema-keys-*`
+- [ ] **Data types** — Native types, not STRING. DECIMAL not FLOAT. → `schema-types-*`
+- [ ] **Indexes** — BloomFilter for equality, Inverted for text, NGram for LIKE → `schema-index-*`
+- [ ] **Properties** — MoW enabled? Compression? Cloud mode replication_num=1? → `schema-props-*`
 
 ---
 
-## Rule Index (Reference Library)
+## 3 ▸ Connection & VeloCLI
 
-All 37 rules, 7 templates, and guides are in `references/`. For quick lookup:
+### Detect VeloCLI
 
-### Data Model (4 rules)
-- `schema-model-choose-for-workload` — DUP vs UNIQUE vs AGG
-- `schema-model-prefer-mow` — Always MoW for UNIQUE
+Before running any queries, check for the `velo` CLI tool:
+
+1. Check `VELO_CLI_PATH` env var — if set, use that binary path
+2. Otherwise run `which velo` — if found, use it from PATH
+3. If neither: fall back to `mysql` client (see `references/start-*.md`)
+
+### When VeloCLI is available, prefer it for all operations:
+
+| Task | VeloCLI Command |
+|------|-----------------|
+| Run SQL | `velo sql "SELECT ..."` |
+| DDL inspection | `velo sql "SHOW CREATE TABLE db.t"` |
+| Table/tablet health | `velo tablet db.t` (overview) or `velo tablet db.t --detail` |
+| Profile a slow query | `velo sql "SELECT ..." --profile` → captures query_id |
+| Get query profile | `velo profile get <qid>` or `--full` for complete diagnosis |
+| Compare fast vs slow | `velo profile diff <slow_qid> <fast_qid>` |
+| Performance trend | `velo profile history <sql_pattern> --days 7` |
+| Test connection | `velo auth status` |
+| Switch environment | `velo use <name>` |
+
+### Quick-start guides
+
+- `references/start-cloud.md` — VeloDB Cloud
+- `references/start-self-hosted.md` — Self-hosted / BYOC / on-prem
+
+---
+
+## 4 ▸ Cluster Sizing
+
+Sizing guides are in:
+- `references/sizing-fe.md` — FE node sizing
+- `references/sizing-be-integrated.md` — BE sizing (integrated storage)
+- `references/sizing-be-cloud.md` — BE sizing (cloud / storage-compute)
+- `references/sizing-storage-formula.md` — Storage calculation formula
+
+---
+
+## 5 ▸ Rule Index by Category
+
+### Data Model — CRITICAL (4 rules)
+- `schema-model-choose-for-workload` — DUP vs UNIQUE vs AGG decision tree
+- `schema-model-prefer-mow` — Always MoW for UNIQUE tables
 - `schema-model-avoid-agg-for-updates` — AGG cannot UPDATE/DELETE
-- `schema-model-sequence-col-for-cdc` — Sequence column for CDC
+- `schema-model-sequence-col-for-cdc` — Sequence column for out-of-order CDC
 
-### Partition (4) · Bucket (5) · Sort Key (5) · Types (5)
-See `references/schema-partition-*`, `schema-bucket-*`, `schema-keys-*`, `schema-types-*`
+### Partition Strategy — CRITICAL (4 rules)
+- `schema-partition-range-for-timeseries` — RANGE for time-series
+- `schema-partition-dynamic-ttl` — Dynamic partition for automated TTL
+- `schema-partition-auto-on-demand` — AUTO for sporadic data
+- `schema-partition-skip-for-small` — Skip partitioning under 1 GB
 
-### Indexes (7) · MVs (3) · Properties (2) · Caching (2)
-See `references/schema-index-*`, `schema-mv-*`, `schema-props-*`, `schema-cache-*`
+### Bucket Strategy — CRITICAL (5 rules)
+- `schema-bucket-hash-vs-random` — HASH for pruning, RANDOM for DUP only
+- `schema-bucket-high-cardinality-key` — Choose high-cardinality column
+- `schema-bucket-composite-for-skew` — Composite key to fix data skew
+- `schema-bucket-target-size` — Target 1-10 GB per tablet
+- `schema-bucket-cloud-mandatory-hash` — Cloud MoW requires HASH
 
-### Use Case Templates (7)
-See `references/usecase-*`
+### Sort Key — CRITICAL (5 rules)
+- `schema-keys-selectivity-first` — High selectivity first
+- `schema-keys-fixed-length-types` — Fixed-length before VARCHAR
+- `schema-keys-prefix-index-limits` — 36 bytes max, VARCHAR terminates it
+- `schema-keys-cluster-key-for-mow` — Cluster key for UNIQUE tables
+- `schema-keys-avoid-float` — No FLOAT/DOUBLE in sort key
 
-### Sizing (4) · Getting Started (2)
-See `references/sizing-*`, `references/start-*`
+### Data Types — HIGH (5 rules)
+- `schema-types-native-vs-string` — Native types, not STRING
+- `schema-types-zonemap-limitations` — JSON/ARRAY disable ZoneMap
+- `schema-types-variant-json` — VARIANT for semi-structured JSON
+- `schema-types-bitmap-count-distinct` — BITMAP_UNION for exact count-distinct
+- `schema-types-doris-specifics` — DATETIME precision, VARCHAR vs STRING
 
-Full compiled document: `AGENTS.md`
+### Indexes — HIGH (7 rules)
+- `schema-index-bloomfilter` — BloomFilter for equality
+- `schema-index-inverted` — Inverted for text/range
+- `schema-index-ngram-for-like` — NGram for LIKE %pattern%
+- `schema-index-bitmap` — Bitmap for medium cardinality
+- `schema-index-vector` — HNSW/IVF for ANN search
+- `schema-index-text-search` — Full-text MATCH + BM25
+
+### Query Acceleration — HIGH (3 rules)
+- `schema-mv-sync-rollup` — Sync MV for single-table aggregation
+- `schema-mv-async-join` — Async MV for multi-table JOIN
+- `schema-mv-async-limits` — Operational limits (50M rows, 3 concurrent)
+
+### Table Properties — HIGH/MEDIUM (2 rules)
+- `schema-props-cloud-forced` — Cloud mode forced properties
+- `schema-props-compression` — LZ4 vs ZSTD compression
+
+### Caching — MEDIUM (2 rules)
+- `schema-cache-file-cache` — File cache for cloud mode
+- `schema-cache-query-partition` — Query and partition cache

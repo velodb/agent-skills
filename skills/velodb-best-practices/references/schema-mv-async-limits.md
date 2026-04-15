@@ -17,7 +17,15 @@ tags: [schema, mv, async, limits, capacity]
 **partition_sync_limit:** Focus refresh on recent data only:
 ```sql
 CREATE MATERIALIZED VIEW mv_recent
+BUILD DEFERRED REFRESH AUTO ON SCHEDULE EVERY 1 HOUR
 PROPERTIES ("partition_sync_limit" = "7")
-REFRESH SCHEDULE EVERY 1 HOUR
 AS SELECT ... FROM orders ...;
 ```
+
+### Diagnostic Checklist (when async MV rewrite not working)
+1. `SELECT Name, State, RefreshState, SyncWithBaseTables FROM mv_infos('database'='db_name')` — State must be NORMAL, RefreshState SUCCESS
+2. `EXPLAIN <query>` — check `MaterializedViewRewriteFail` section at bottom
+3. `"View struct info is invalid"` — benign; read the error AFTER it for the real cause
+4. `"Predicate compensate fail"` — WHERE on dimension column; query the MV directly instead
+5. `"The graph logic between query and view is not consistent"` — JOIN type or table order mismatch
+6. `SHOW VARIABLES LIKE '%materialized_view%'` — verify `enable_materialized_view_rewrite = true`

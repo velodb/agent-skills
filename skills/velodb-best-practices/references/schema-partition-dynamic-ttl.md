@@ -26,6 +26,8 @@ PROPERTIES (
 );
 ```
 
-**Warning: Do not use dynamic partition for tables with < 20 million rows.** For small tables, it creates wasteful empty partitions that go unnoticed and add unnecessary metadata overhead. Use a single partition or no partition instead.
+**Warnings:**
+- Do not use dynamic partition for tables with < 20 million rows. Creates wasteful empty partitions.
+- **Do NOT combine with AUTO PARTITION.** If using `AUTO PARTITION BY RANGE`, do not add `dynamic_partition.*` properties — they are redundant and conflict. AUTO PARTITION handles partition creation on data arrival. For TTL cleanup, use a scheduled `ALTER TABLE ... DROP PARTITION` job instead.
 
 Reference: [Dynamic Partition](https://doris.apache.org/docs/table-design/data-partitioning/dynamic-partitioning)

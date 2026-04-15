@@ -23,7 +23,12 @@ DISTRIBUTED BY HASH(user_id) BUCKETS AUTO;
 ```
 
 **When to use AUTO vs DYNAMIC:**
-- **Dynamic:** Continuous data (logs, metrics) — pre-creates future partitions
-- **Auto:** Sporadic data (user uploads, batch jobs) — creates only when data arrives
+- **Auto:** Preferred for most cases — creates partitions on data arrival, no empty partitions
+- **Dynamic:** Only when you need TTL-based auto-deletion of old partitions AND data arrives predictably every period
+
+**WARNING: Do NOT combine AUTO PARTITION with dynamic_partition properties.** They are redundant and conflict:
+- AUTO PARTITION already creates partitions on arrival — `dynamic_partition.end` (pre-creation) is unnecessary
+- `dynamic_partition.prefix` conflicts with AUTO's naming scheme
+- If you need old partition cleanup, use a scheduled `ALTER TABLE ... DROP PARTITION` job instead
 
 Reference: [Auto Partition](https://doris.apache.org/docs/table-design/data-partitioning/auto-partitioning)
