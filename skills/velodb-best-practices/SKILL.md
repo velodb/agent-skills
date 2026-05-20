@@ -101,6 +101,16 @@ Before running any queries, check for the `velo` CLI tool:
 - `references/start-cloud.md` — VeloDB Cloud
 - `references/start-self-hosted.md` — Self-hosted / BYOC / on-prem
 
+### Driving an end-to-end workflow
+
+When the user asks you to drive a multi-step workflow with `velo`
+(benchmarks, demos, tuning loops, ad-hoc analysis), consult
+`references/velocli-capabilities-and-handoffs.md` first. It has the
+full command map plus the two places the CLI **cannot** help you and
+you must hand off to the user: **warehouse creation** and **bulk data
+loading**. In those cases, stop, give the user the exact manual
+steps, and wait for their confirmation before continuing.
+
 ---
 
 ## 4 ▸ Cluster Sizing

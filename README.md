@@ -41,7 +41,7 @@ skills/velodb-best-practices/
 ├── SKILL.md                    # Main instructions (4-step workflow)
 ├── AGENTS.md                   # Compiled reference (all rules inline)
 ├── install.sh                  # Multi-agent installer
-└── references/                 # 49 rule files
+└── references/                 # 50 reference files
     ├── schema-model-*.md       # Data model rules (4)
     ├── schema-partition-*.md   # Partition rules (4)
     ├── schema-bucket-*.md      # Bucket rules (5)
@@ -53,7 +53,8 @@ skills/velodb-best-practices/
     ├── schema-cache-*.md       # Cache rules (2)
     ├── usecase-*.md            # Use case templates (7)
     ├── sizing-*.md             # Cluster sizing guides (4)
-    └── start-*.md              # Getting started (2)
+    ├── start-*.md              # Getting started (2)
+    └── velocli-*.md            # CLI capabilities + manual handoffs (1)
 ```
 
 ## Supported Agents
